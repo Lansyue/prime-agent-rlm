@@ -45,6 +45,20 @@ import { createRetryCapFetch } from "./retry-cap.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
+// PII hard gate (2026-09-24, PM decision after bailian data_inspection_failed locked session 01a0c3c8):
+// mask mainland-China mobile numbers and ID card numbers before they leave for the provider,
+// so reading customer rosters can no longer poison the whole conversation history.
+// Escape hatch: PRIME_PII_MASK=off restores raw passthrough.
+const PII_PHONE_RE = /(?<!\d)1[3-9]\d{9}(?!\d)/g;
+const PII_ID_RE = /(?<!\d)\d{17}[\dXx](?!\d)/g;
+function maskPII(text: string): string {
+	if (process.env.PRIME_PII_MASK === "off") return text;
+	return text
+		.replace(PII_PHONE_RE, (m) => `${m.slice(0, 3)}****${m.slice(-4)}`)
+		.replace(PII_ID_RE, (m) => `${m.slice(0, 6)}********${m.slice(-4)}`);
+}
+const sanitizeText = (text: string): string => maskPII(sanitizeSurrogates(text));
+
 const log = getLogger("ai.provider");
 
 /**
@@ -1149,7 +1163,7 @@ export function convertMessages(
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
 		const role = useDeveloperRole ? "developer" : "system";
-		params.push({ role: role, content: sanitizeSurrogates(context.systemPrompt) });
+		params.push({ role: role, content: sanitizeText(context.systemPrompt) });
 	}
 
 	let lastRole: string | null = null;
@@ -1169,14 +1183,14 @@ export function convertMessages(
 			if (typeof msg.content === "string") {
 				params.push({
 					role: "user",
-					content: sanitizeSurrogates(msg.content),
+					content: sanitizeText(msg.content),
 				});
 			} else {
 				const content: ChatCompletionContentPart[] = msg.content.map((item): ChatCompletionContentPart => {
 					if (item.type === "text") {
 						return {
 							type: "text",
-							text: sanitizeSurrogates(item.text),
+							text: sanitizeText(item.text),
 						} satisfies ChatCompletionContentPartText;
 					} else {
 						return {
@@ -1207,7 +1221,7 @@ export function convertMessages(
 					(block) =>
 						({
 							type: "text",
-							text: sanitizeSurrogates(block.text),
+							text: sanitizeText(block.text),
 						}) satisfies ChatCompletionContentPartText,
 				);
 			const assistantText = assistantTextParts.map((part) => part.text).join("");
@@ -1226,9 +1240,7 @@ export function convertMessages(
 			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
 					// Convert thinking blocks to plain text (no tags to avoid model mimicking them)
-					const thinkingText = nonEmptyThinkingBlocks
-						.map((block) => sanitizeSurrogates(block.thinking))
-						.join("\n\n");
+					const thinkingText = nonEmptyThinkingBlocks.map((block) => sanitizeText(block.thinking)).join("\n\n");
 					assistantMsg.content = [{ type: "text", text: thinkingText }, ...assistantTextParts];
 				} else {
 					// Always send assistant content as a plain string (OpenAI Chat Completions
@@ -1246,9 +1258,7 @@ export function convertMessages(
 					// reasoning_content="" default below would clobber the trace); else round-trip
 					// into the recorded field; with neither, keep the trace as text rather than
 					// inventing an unsupported field.
-					const reasoningText = nonEmptyThinkingBlocks
-						.map((block) => sanitizeSurrogates(block.thinking))
-						.join("\n");
+					const reasoningText = nonEmptyThinkingBlocks.map((block) => sanitizeText(block.thinking)).join("\n");
 					const reasoningField = compat.requiresReasoningContentOnAssistantMessages
 						? "reasoning_content"
 						: nonEmptyThinkingBlocks[0].thinkingSignature || undefined;
@@ -1332,7 +1342,7 @@ export function convertMessages(
 				const hasText = textResult.length > 0;
 				const toolResultMsg: ChatCompletionToolMessageParam = {
 					role: "tool",
-					content: sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : ""),
+					content: sanitizeText(hasText ? textResult : hasImages ? "(see attached image)" : ""),
 					tool_call_id: toolMsg.toolCallId,
 				};
 				if (compat.requiresToolResultName && toolMsg.toolName) {
