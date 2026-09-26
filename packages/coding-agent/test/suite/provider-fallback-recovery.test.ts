@@ -13,10 +13,12 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	CONTENT_INSPECTION_SEED_TERMS,
 	PROVIDER_FALLBACK_NOTICE_CUSTOM_TYPE,
 	PROVIDER_FALLBACK_RETURN_AFTER_MS,
 	PROVIDER_LONG_WAIT_RESUME_MARKER_TEXT,
 	readProviderFallbackEntries,
+	scanContentInspectionTriggers,
 } from "../../src/core/provider-fallback.js";
 import type { Settings } from "../../src/core/settings-manager.js";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.js";
@@ -29,7 +31,7 @@ import { createHarness, type Harness, type HarnessOptions } from "./harness.js";
  * auth shapes the chain never saw, and a provider's content filter.
  */
 
-const FILTERED_TEXT = "DDoS attack firewall bypass log";
+const FILTERED_TEXT = `DDoS ${CONTENT_INSPECTION_SEED_TERMS[2]} ${CONTENT_INSPECTION_SEED_TERMS[3]} bypass log`;
 
 const MODELS = [{ id: "faux-1" }, { id: "faux-kimi" }, { id: "faux-qwen" }, { id: "faux-glm" }];
 
@@ -703,8 +705,8 @@ describe("fallback chain business logic", () => {
 		await harness.session.prompt("check the server logs");
 
 		expect(calls.map((call) => call.model)).toEqual(["faux-1", "faux-1", "faux-1"]);
-		expect(contextText(calls[1]!.context)).toContain("DDoS attack firewall bypass log");
-		expect(contextText(calls[2]!.context)).not.toContain("DDoS attack firewall bypass log");
+		expect(contextText(calls[1]!.context)).toContain(FILTERED_TEXT);
+		expect(contextText(calls[2]!.context)).not.toContain(FILTERED_TEXT);
 		expect(contextText(calls[2]!.context)).toContain("[Tool output withheld:");
 		const last = harness.session.messages.at(-1);
 		expect(last?.role === "assistant" ? last.stopReason : undefined).toBe("stop");
@@ -712,7 +714,7 @@ describe("fallback chain business logic", () => {
 
 		const restarted = await harnessWith({ existingSessionFile: harness.session.sessionFile!, tools: [readLogTool] });
 		const text = JSON.stringify(restarted.session.messages);
-		expect(text).not.toContain("DDoS attack firewall bypass log");
+		expect(text).not.toContain(FILTERED_TEXT);
 		expect(text).toContain("[Tool output withheld:");
 	});
 

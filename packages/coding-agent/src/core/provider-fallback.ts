@@ -258,6 +258,92 @@ export function contentInspectionPlaceholder(originalChars: number): string {
 	);
 }
 
+/** Seed terms the Bailian content inspection is known (field evidence, 2026-09) to refuse. */
+/**
+ * Seed terms the Bailian content inspection is known (field evidence, 2026-09)
+ * to refuse. Stored base64-encoded on purpose: these are the exact strings that
+ * trip the provider's filter, and a plaintext list inside a source file poisons
+ * every reader - a subagent that greps this file to answer a question sends the
+ * terms in its next request and dies on a non-retryable 400
+ * `DataInspectionFailed` (one did, 2026-09-26, because its dispatch brief quoted
+ * three of them verbatim). Decoding at module load keeps the matcher exact while
+ * keeping the words out of any transcript, diff or review report.
+ */
+const CONTENT_INSPECTION_SEED_TERMS_B64 =
+	"WyLoh6rmnYAiLCAi6Ieq5q+BIiwgIuaUu+WHu+mdoiIsICLpmLLngavlopkiLCAi5pS75Ye7IiwgIua4l+mAjyIsICLmvI/m" +
+	"tJ7liKnnlKgiLCAi5o+Q5p2DIiwgIui/nOaOp+acqOmprCIsICJkZG9zIiwgIuadgOavkiIsICLnl4Xmr5IiLCAi6IKJ6bih" +
+	"IiwgIui3s+adv+acuiIsICJzdWljaWRlIiwgImF0dGFjayIsICJmaXJld2FsbCIsICJpbnRydXNpb24iLCAiZXhwbG9pdCIs" +
+	"ICJtYWx3YXJlIl0=";
+
+export const CONTENT_INSPECTION_SEED_TERMS: readonly string[] = JSON.parse(
+	Buffer.from(CONTENT_INSPECTION_SEED_TERMS_B64, "base64").toString("utf8"),
+) as string[];
+
+export interface ContentInspectionTrigger {
+	/** 0-based index of the message in the outbound context. */
+	index: number;
+	role: AgentMessage["role"];
+	/** Custom messages: their type, so the hit names the injected kind. */
+	customType?: string;
+	term: string;
+	/** ~60 characters around the first hit of the term. */
+	snippet: string;
+}
+
+function outboundText(message: AgentMessage): string {
+	if (message.role === "toolResult") {
+		// A placeholder the recovery already installed carries the words "<masked-term>" and
+		// "<masked-term>" of its own: scanning it would point at a message that was
+		// withheld precisely because those words were refused.
+		return isWithheldToolResult(message) ? "" : toolResultText(message);
+	}
+	if (message.role === "custom") {
+		return typeof message.content === "string"
+			? message.content
+			: message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+	}
+	if ("content" in message && Array.isArray(message.content)) {
+		return message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+	}
+	return "";
+}
+
+/**
+ * Where in the outbound context the words the provider's inspection most
+ * likely refused live: a cheap seed-term scan over the exact text the provider
+ * sees (user/assistant text, custom message content, tool results), already
+ * withheld placeholders excluded. Only the first hit per message is kept; a
+ * wrong guess costs a notice line, never a rewrite.
+ */
+export function scanContentInspectionTriggers(
+	messages: readonly AgentMessage[],
+	limit = 8,
+	terms: readonly string[] = CONTENT_INSPECTION_SEED_TERMS,
+): ContentInspectionTrigger[] {
+	const triggers: ContentInspectionTrigger[] = [];
+	for (let index = 0; index < messages.length && triggers.length < limit; index += 1) {
+		const message = messages[index];
+		const text = outboundText(message);
+		if (!text) continue;
+		const haystack = text.toLowerCase();
+		for (const raw of terms) {
+			const term = raw.toLowerCase();
+			const at = haystack.indexOf(term);
+			if (at < 0) continue;
+			const from = Math.max(0, at - 30);
+			triggers.push({
+				index,
+				role: message.role,
+				...(message.role === "custom" ? { customType: message.customType } : {}),
+				term: raw,
+				snippet: text.slice(from, Math.min(text.length, at + raw.length + 30)).replace(/\s+/g, " "),
+			});
+			break; // one hit per message is enough to name it
+		}
+	}
+	return triggers;
+}
+
 const PROVIDER_NAMES: Record<string, string> = {
 	bailian: "百炼",
 	dashscope: "百炼",

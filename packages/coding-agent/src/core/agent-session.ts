@@ -317,6 +317,7 @@ import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./p
 import {
 	BAD_TOOL_CALL_STORM_THRESHOLD,
 	CONTENT_INSPECTION_WITHHOLD_STEPS,
+	type ContentInspectionTrigger,
 	contextHasImages,
 	createImageUnreadNoticeText,
 	describeProviderFailureCause,
@@ -334,6 +335,7 @@ import {
 	providerLongWaitDelayMs,
 	readPersistedFallbackEpisode,
 	readPersistedLongWait,
+	scanContentInspectionTriggers,
 	toolResultText,
 	withheldToolResult,
 } from "./provider-fallback.js";
@@ -20578,18 +20580,34 @@ export class AgentSession {
 		const name = message.provider ?? "服务商";
 		this._inspectionRecoverySteps += 1;
 		const step = this._inspectionRecoverySteps;
+		// Where the refused words most likely live: a cheap scan of exactly the text the
+		// provider saw. A wrong guess costs a notice line, never a rewrite - but it is
+		// the only thing that tells the owner which history segment to look at, and the
+		// field evidence says the trigger is often an injected custom message, not a
+		// tool output.
+		const triggers = scanContentInspectionTriggers(this.agent.state.messages);
 		sessionLog.warn("provider content inspection rejected the request", {
 			sessionId: this.sessionId,
 			provider: message.provider,
 			model: message.model,
 			step,
+			triggers,
 		});
+		// The notice is persisted and restored into the rebuilt context, so it names the
+		// suspect messages but carries none of their raw text: a snippet of exactly the
+		// words the filter refused would put them back where a placeholder removed them.
+		const triggerRefs = triggers.map(({ index, role, customType, term }) => ({
+			index,
+			role,
+			...(customType ? { customType } : {}),
+			term,
+		}));
 		if (step <= CONTENT_INSPECTION_WITHHOLD_STEPS) {
 			const withheld = this._withholdMostRecentToolOutputs();
 			if (withheld > 0) {
 				this._emitFallbackNotice(
-					`${name} 的内容审核拒绝了这次请求（多半是工具输出里有「攻击」「防火墙」这类词）。已把最近 ${withheld} 条工具输出从对话里隐去，并提示模型换个方式重新获取，正在自动重试。`,
-					{ kind: "content_inspection", step, withheld },
+					`${name} 的内容审核拒绝了这次请求${this._describeInspectionTriggers(triggers)}。已把最近 ${withheld} 条工具输出从对话里隐去，并提示模型换个方式重新获取，正在自动重试。`,
+					{ kind: "content_inspection", step, withheld, triggers: triggerRefs },
 				);
 				this._startFreshRequestLadder();
 				this._retryAttempt += 1;
@@ -20619,9 +20637,9 @@ export class AgentSession {
 		}
 		const finalError =
 			step > 1
-				? `${name} 的内容审核拒绝了这次请求（data_inspection_failed），隐去最近的工具输出后仍被拒绝，也没有其他服务商的备用模型可换。请换个说法重发，或在设置里加一个其他服务商的备用模型。`
-				: `${name} 的内容审核拒绝了这次请求（data_inspection_failed），对话里没有可以隐去的工具输出，也没有其他服务商的备用模型可换。请换个说法重发，或在设置里加一个其他服务商的备用模型。`;
-		this._emitFallbackNotice(finalError, { kind: "content_inspection", step, terminal: true });
+				? `${name} 的内容审核拒绝了这次请求（data_inspection_failed），隐去最近的工具输出后仍被拒绝，也没有其他服务商的备用模型可换。请换个说法重发，或在设置里加一个其他服务商的备用模型。${this._describeInspectionTriggers(triggers, "可能触发审核的内容：")}`
+				: `${name} 的内容审核拒绝了这次请求（data_inspection_failed），对话里没有可以隐去的工具输出，也没有其他服务商的备用模型可换。请换个说法重发，或在设置里加一个其他服务商的备用模型。${this._describeInspectionTriggers(triggers, "可能触发审核的内容：")}`;
+		this._emitFallbackNotice(finalError, { kind: "content_inspection", step, terminal: true, triggers: triggerRefs });
 		const attempt = this._retryAttempt;
 		// A retry that never started has no retry to end: the notice alone reports it.
 		if (attempt > 0) this._emit({ type: "auto_retry_end", success: false, attempt, finalError });
@@ -20633,6 +20651,30 @@ export class AgentSession {
 		this._inspectionRecoverySteps = 0;
 		this._resolveRetry();
 		return false;
+	}
+
+	/** The owner-facing one-liner of a trigger scan: which messages hold the suspect words. */
+	private _describeInspectionTriggers(triggers: readonly ContentInspectionTrigger[], prefix = ""): string {
+		if (triggers.length === 0) return "";
+		// The refused term is masked, never spelled out. This text becomes a
+		// display=true custom notice that convertToLlm sends to the model as a user
+		// message on the very retry that was just refused, so an unmasked term would
+		// put the trigger word straight back into the request the provider is
+		// refusing — turning a one-shot 400 into a retry loop. The exact term is kept
+		// in the notice's `details` (not outbound) and in the session log, so the owner
+		// and any auditor still get the real word; the model only learns "a term of
+		// this length in this kind of message". The role/customType and the char count
+		// are what actually help the owner locate the offending segment.
+		const named = triggers
+			.slice(0, 3)
+			.map((trigger) => {
+				const masked = `＊`.repeat(Math.min(trigger.term.length, 8));
+				return trigger.role === "custom"
+					? `${trigger.customType ?? "custom"} 消息里的一个 ${masked}（${trigger.term.length} 字词）`
+					: `${trigger.role} 消息里的一个 ${masked}（${trigger.term.length} 字词）`;
+			});
+		const rest = triggers.length > named.length ? ` 等 ${triggers.length} 处` : "";
+		return `${prefix ? `（${prefix}${named.join("、")}${rest}）` : `（疑似触发点：${named.join("、")}${rest}）`}`;
 	}
 
 	/**
