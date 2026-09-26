@@ -57,6 +57,10 @@ function createSupervisorHarness(): SupervisorHarness {
 function worker(lifecycle: "starting" | "ready" | "recovering" | "failed", connected = true, workerId = "worker") {
 	return {
 		descriptor: { lifecycle, workerId },
+		// A resident worker always carries these maps (see ResidentWorker in
+		// daemon-supervisor.ts); syncLiveThreadsSnapshot reads summaries, so a
+		// partial double crashes on .get() instead of exercising the path.
+		summaries: new Map(),
 		...(connected ? { client: {} } : {}),
 	};
 }

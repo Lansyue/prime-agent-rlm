@@ -369,6 +369,8 @@ describe("InteractiveMode streaming events", () => {
 			focusEditor: vi.fn(),
 			toggleToolOutputExpansion: vi.fn(),
 			toggleThinkingBlockVisibility: vi.fn(),
+			// Leaving the panel drops its focus, so the double needs the field.
+			subagentSummaryLine: { focused: true },
 		};
 
 		handleSubagentSummaryChatAction.call(fakeThis, "x");
